@@ -138,7 +138,7 @@ init_assignment1_db()
 # Bump APP_VERSION whenever the code changes. The label at the top of every
 # page shows it together with the time the server started, so it is easy to
 # confirm that the browser is really showing the newest code.
-APP_VERSION = 'Assignment 1 - v1.1'
+APP_VERSION = 'Assignment 2 - v2.0'
 SERVER_STARTED = datetime.now().strftime('%H:%M:%S')
 print(f' * MiniSocial {APP_VERSION} (server started {SERVER_STARTED})')
 
@@ -516,7 +516,14 @@ def add_post():
     # Get content from the submitted form
     content = request.form.get('content')
 
-    # Pass the user's content through the moderation function
+    # Assignment 2, Design Claim 20: before publishing, check the draft with
+    # moderate_content(). If it breaks a rule, stop and show a reminder page
+    # instead of posting (unless the user already confirmed on that page).
+    if needs_reminder(content):
+        return send_to_reminder('post', content)
+
+    # The original text is stored; moderate_content() is applied when it is
+    # displayed, so moderators in /admin can still see what was written.
     moderated_content = content
 
     # Basic validation to ensure post is not empty
@@ -526,6 +533,10 @@ def add_post():
                    (user_id, moderated_content))
         db.commit()
         flash('Your post was successfully created!', 'success')
+        # Assignment 2, DC20: if this came from the review page, finish there.
+        draft_done = finish_reminder(content)
+        if draft_done:
+            return redirect(draft_done)
     else:
         # This will catch empty posts or posts that were fully censored
         flash('Post cannot be empty or was fully censored.', 'warning')
@@ -794,6 +805,10 @@ def add_comment(post_id):
     # Get content from the submitted form
     content = request.form.get('content')
 
+    # Assignment 2, Design Claim 20: same point-of-action reminder as for posts.
+    if needs_reminder(content):
+        return send_to_reminder('comment', content, post_id=post_id)
+
     # Basic validation to ensure comment is not empty
     if content and content.strip():
         db = get_db()
@@ -803,6 +818,10 @@ def add_comment(post_id):
         flash('Your comment was added.', 'success')
         # Assignment 1, Feature 3: confirm when this comment returned a favor.
         favor_flash_if_returned(user_id, post_id)
+        # Assignment 2, DC20: if this came from the review page, finish there.
+        draft_done = finish_reminder(content)
+        if draft_done:
+            return redirect(draft_done)
     else:
         flash('Comment cannot be empty.', 'warning')
 
@@ -1165,6 +1184,129 @@ def rules():
     return render_template('rules.html.j2')
 
 
+# =====================================================================
+# CODING ASSIGNMENT 2 - Design Claim 20 (Chapter 4):
+# "Offering people reminders at the point of an action that may violate
+#  norms reduces the number of offenses."
+#
+# When a user submits a post or comment that breaks a rule, it is NOT
+# published straight away. The user is sent to a "review" page that shows
+# which rules the draft breaks and how it would look after moderation, and
+# can then edit it, cancel, or (for mild issues only) post it anyway.
+# =====================================================================
+
+def explain_violations(content):
+    """
+    Lists, in plain language, which moderation rules a draft breaks.
+    Uses the same compiled regexes as moderate_content(), so the reminder
+    always matches what the moderation will actually do.
+    Returns (list_of_messages, is_severe). Severe drafts cannot be posted.
+    """
+    if not content:
+        return [], False
+    if TIER1_REGEX and TIER1_REGEX.search(content):
+        return ['It contains language that is not allowed on MiniSocial at all. '
+                'The whole text would be removed.'], True
+    if TIER2_REGEX and TIER2_REGEX.search(content):
+        return ['It looks like spam or a scam. The whole text would be removed.'], True
+
+    issues = []
+    links = len(URL_REGEX.findall(content))
+    if links:
+        issues.append(f'It contains {links} external link{"s" if links > 1 else ""}, '
+                      f'which will be replaced with "{LINK_REPLACEMENT}".')
+    profanity = len(TIER3_REGEX.findall(content)) if TIER3_REGEX else 0
+    if profanity:
+        issues.append(f'It contains {profanity} word{"s" if profanity > 1 else ""} from the '
+                      f'mild-profanity list, which will be shown as ****.')
+    letters = [ch for ch in content if ch.isalpha()]
+    if len(letters) > CAPS_MIN_LETTERS and sum(ch.isupper() for ch in letters) / len(letters) > CAPS_RATIO:
+        issues.append('It is written mostly in CAPITAL LETTERS, which reads as shouting.')
+    return issues, False
+
+
+def needs_reminder(content):
+    """
+    True if the draft should be stopped and reviewed before publishing.
+    - Severe drafts (Tier 1/2) are always stopped: they would be removed anyway.
+    - Mild drafts are stopped once; if the user presses "Post anyway" on the
+      review page, the form carries confirmed=1 and the draft goes through.
+    """
+    if not content or not content.strip():
+        return False
+    _, score = moderate_content(content)
+    if score == 0:
+        return False
+    _, severe = explain_violations(content)
+    return severe or request.form.get('confirmed') != '1'
+
+
+def send_to_reminder(kind, content, post_id=None):
+    """Keeps the draft in the session and redirects to the review page."""
+    return_to = request.referrer or url_for('feed')
+    previous = session.get('pending_draft')
+    if request.form.get('from_review') == '1' and previous:
+        # Re-checked from the review page: keep the ORIGINAL page to return to.
+        return_to = previous.get('return_to', return_to)
+    session['pending_draft'] = {
+        'kind': kind,                      # 'post' or 'comment'
+        'content': content,
+        'post_id': post_id,                # only for comments
+        'return_to': return_to,
+    }
+    return redirect(url_for('review_draft'))
+
+
+def finish_reminder(content):
+    """
+    Called after a post/comment is saved. If it was a draft from the review
+    page, clears it, thanks the user if they fixed it (face-saving, positive
+    feedback), and returns the page they originally came from. Otherwise None.
+    """
+    draft = session.pop('pending_draft', None)
+    # Only drafts submitted FROM the review page count (from_review=1);
+    # an old draft left in the session must not affect a normal new post.
+    if not draft or request.form.get('from_review') != '1':
+        return None
+    if moderate_content(content)[1] == 0:
+        flash('Thanks for editing! Your text now follows the community rules.', 'success')
+    return draft.get('return_to') or url_for('feed')
+
+
+@app.route('/review', methods=['GET'])
+def review_draft():
+    """
+    The point-of-action reminder page. Shows the user's draft, the rules it
+    breaks, and a preview of how it would appear after moderation.
+    The edit form posts back to the normal add_post/add_comment route, so an
+    edited draft is checked again automatically.
+    """
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+    draft = session.get('pending_draft')
+    if not draft:
+        return redirect(url_for('feed'))
+
+    issues, severe = explain_violations(draft['content'])
+    preview, score = moderate_content(draft['content'])
+    if draft['kind'] == 'post':
+        action_url = url_for('add_post')
+    else:
+        action_url = url_for('add_comment', post_id=draft['post_id'])
+
+    return render_template('review_draft.html.j2',
+                           draft=draft, issues=issues, severe=severe,
+                           preview=preview, score=score, action_url=action_url)
+
+
+@app.route('/review/cancel', methods=['POST'])
+def cancel_draft():
+    """Discards the pending draft and returns to where the user came from."""
+    draft = session.pop('pending_draft', None)
+    flash('Your draft was discarded.', 'info')
+    return redirect((draft or {}).get('return_to') or url_for('feed'))
+
+
 # ---------- Assignment 1, Feature 2: the "My Goals" page ----------
 @app.route('/goals', methods=['GET', 'POST'])
 def goals():
@@ -1227,6 +1369,54 @@ def loop_color(user_id):
 # ----- Functions to be implemented are below
 # Coding Assignment #2
 
+# --- Moderation rule constants (values from the /rules page) ---
+SEVERE_SCORE = 5.0              # Rules 1.1.1 / 1.1.2: fixed score for removed content
+TIER3_PENALTY = 2.0             # Rule 1.2.1: per mild-profanity match
+LINK_PENALTY = 2.0              # Rule 1.2.2: per external link
+CAPS_PENALTY = 0.5              # Rule 1.2.3: excessive capitalization
+CAPS_MIN_LETTERS = 15           # Rule 1.2.3: applies only if MORE than 15 letters...
+CAPS_RATIO = 0.70               # ...and MORE than 70% of them are uppercase
+TIER1_REMOVED_TEXT = '[content removed due to severe violation]'
+TIER2_REMOVED_TEXT = '[content removed due to spam/scam policy]'
+LINK_REPLACEMENT = '[link removed]'
+
+
+def build_whole_word_regex(terms):
+    """
+    Builds ONE case-insensitive regex that matches any of the given words or
+    phrases as whole words/phrases.
+
+    - (?<!\\w) and (?!\\w) are used instead of \\b because some phrases start or
+      end with non-letters (e.g. "100% free"), where \\b would fail.
+    - Longest terms come first, so a multi-word phrase wins over a single word
+      it contains and the same text is never counted twice.
+    - Spaces inside phrases match any whitespace ("risk  free" with 2 spaces).
+    """
+    if not terms:
+        return None
+    escaped = [re.escape(t.strip()).replace(r'\ ', r'\s+')
+               for t in sorted(terms, key=len, reverse=True) if t.strip()]
+    return re.compile(r'(?<!\w)(?:' + '|'.join(escaped) + r')(?!\w)', re.IGNORECASE)
+
+
+# Compiled once at start-up: the admin page moderates thousands of texts per load.
+TIER1_REGEX = build_whole_word_regex(TIER1_WORDS)
+TIER2_REGEX = build_whole_word_regex(TIER2_PHRASES)
+TIER3_REGEX = build_whole_word_regex(TIER3_WORDS)
+
+# Rule 1.2.2: what counts as a URL. Matches
+#   - anything starting with http:// or https://
+#   - anything starting with www.
+#   - bare domains with a common top-level domain, e.g. "cheap-pills.biz/offer"
+# Trailing punctuation (".", ",", ")", "!" ...) is left outside the match, so
+# "see example.com." keeps its final full stop.
+URL_REGEX = re.compile(
+    r'(?:https?://|www\.)[^\s<>"\']+?(?=[.,!?;:)\]]*(?:\s|$))'
+    r'|(?<![\w@.-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|info|biz|io|co|xyz|ru|fi|gr|eu|uk|de|ly|me|tk|top|online|site|shop)'
+    r'(?:/[^\s<>"\']*?)?(?=[.,!?;:)\]]*(?:\s|$))',
+    re.IGNORECASE)
+
+
 # Assignment 2.2
 def user_risk_analysis(user_id):
     """
@@ -1234,17 +1424,63 @@ def user_risk_analysis(user_id):
         user_id: The ID of the user on which we perform risk analysis.
 
     Returns:
-        A float number score showing the risk associated with this user. There are no strict rules or bounds to this score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk. (An upper bound of 5.0 is applied to this score elsewhere in the codebase) 
-        
+        A float number score showing the risk associated with this user. There are no strict rules or bounds to this score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk. (An upper bound of 5.0 is applied to this score elsewhere in the codebase)
+
         You will be able to check the scores by logging in with the administrator account:
             username: admin
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
-    """
-    
-    score = 0
 
-    return score;
+    Implementation follows Rule 2.2 on the /rules page, step by step.
+    """
+    user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return 0.0
+
+    # Step 1: Content Score of the profile text.
+    _, profile_score = moderate_content(user['profile'])
+
+    # Step 2: average Content Score of all the user's posts (0 if no posts).
+    posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
+    post_scores = [moderate_content(p['content'])[1] for p in posts]
+    average_post_score = sum(post_scores) / len(post_scores) if post_scores else 0.0
+
+    # Step 3: average Content Score of all the user's comments (0 if none).
+    comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+    comment_scores = [moderate_content(c['content'])[1] for c in comments]
+    average_comment_score = sum(comment_scores) / len(comment_scores) if comment_scores else 0.0
+
+    # Step 4: weighted combination. Posts weigh 3x because they are the most
+    # visible content on the platform.
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+
+    # Step 5: new accounts are riskier (throwaway / spam accounts).
+    age_days = account_age_days(user['created_at'])
+    if age_days < 7:
+        user_risk_score = content_risk_score * 1.5
+    elif age_days < 30:
+        user_risk_score = content_risk_score * 1.2
+    else:
+        user_risk_score = content_risk_score
+
+    # Step 6: cap at 5.0.
+    return min(user_risk_score, 5.0)
+
+
+def account_age_days(created_at):
+    """
+    Returns the age of an account in whole days. created_at comes from SQLite
+    either as a datetime (PARSE_DECLTYPES) or a string. Timestamps are stored
+    in UTC, so utcnow() is used. A missing date counts as an old account.
+    """
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return 9999
+    if not isinstance(created_at, datetime):
+        return 9999
+    return (datetime.utcnow() - created_at).days
 
     
 # Assignment 2.1
@@ -1263,11 +1499,44 @@ def moderate_content(content):
             username: admin
             password: admin
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
-    """
 
+    Implementation follows Part 1 of the /rules page, in the order given there.
+    """
+    # Empty profiles/posts come from the database as None or "".
+    if not content:
+        return '', 0.0
+
+    # ---- Stage 1.1: severe violations -> remove everything, fixed score ----
+    # Rule 1.1.1: any Tier 1 word removes the whole content.
+    if TIER1_REGEX and TIER1_REGEX.search(content):
+        return TIER1_REMOVED_TEXT, SEVERE_SCORE
+    # Rule 1.1.2: only checked when there was no Tier 1 match.
+    if TIER2_REGEX and TIER2_REGEX.search(content):
+        return TIER2_REMOVED_TEXT, SEVERE_SCORE
+
+    # ---- Stage 1.2: scored violations, score starts at 0.0 ----
+    score = 0.0
     moderated_content = content
-    score = 0
-    
+
+    # Rule 1.2.2: external links. Done BEFORE Tier 3 so that a word hidden
+    # inside a URL is not counted twice (once as a word, once as a link).
+    moderated_content, link_count = URL_REGEX.subn(LINK_REPLACEMENT, moderated_content)
+    score += link_count * LINK_PENALTY
+
+    # Rule 1.2.1: Tier 3 words -> asterisks of the same length, +2.0 each.
+    # subn() returns how many replacements were made = number of matches.
+    moderated_content, tier3_count = TIER3_REGEX.subn(
+        lambda m: '*' * len(m.group(0)), moderated_content) if TIER3_REGEX else (moderated_content, 0)
+    score += tier3_count * TIER3_PENALTY
+
+    # Rule 1.2.3: excessive capitalization. Measured on the ORIGINAL text
+    # (asterisks would hide letters); the content itself is not modified.
+    letters = [ch for ch in content if ch.isalpha()]
+    if len(letters) > CAPS_MIN_LETTERS:
+        uppercase_ratio = sum(ch.isupper() for ch in letters) / len(letters)
+        if uppercase_ratio > CAPS_RATIO:
+            score += CAPS_PENALTY
+
     return moderated_content, score
 
 # Coding Assignment #3

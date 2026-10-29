@@ -1,0 +1,63 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{#
+  Assignment 2 - Design Claim 20 (Chapter 4):
+  "Offering people reminders at the point of an action that may violate
+   norms reduces the number of offenses."
+  Shown INSTEAD of publishing when a draft breaks a moderation rule.
+#}
+
+<div class="col-md-8 mx-auto">
+  <h2 class="text-center border-bottom pb-2 mb-4">✋ Before you {{ 'post' if draft.kind == 'post' else 'comment' }}…</h2>
+
+  <!-- 1. The reminder itself: which community rules this draft breaks -->
+  <div class="alert {% if severe %}alert-danger{% else %}alert-warning{% endif %}">
+    <strong>Your {{ draft.kind }} doesn't follow the <a href="{{ url_for('rules') }}" class="alert-link">community rules</a>:</strong>
+    <ul class="mb-0 mt-2">
+      {% for issue in issues %}
+        <li>{{ issue }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+
+  <!-- 2. Preview: exactly how other members would see it after moderation -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <h6 class="card-title text-muted">This is how others would see it:</h6>
+      <p class="mb-1 fst-italic">"{{ preview }}"</p>
+      <small class="text-muted">Risk score: {{ score }} {% if score >= 5 %}(HIGH){% elif score >= 3 %}(MEDIUM){% elif score >= 1 %}(LOW){% endif %}</small>
+    </div>
+  </div>
+
+  <!-- 3. Face-saving option: fix the draft privately before anyone sees it.
+       Posts back to the normal route, so the edit is checked again. -->
+  <div class="card shadow-sm mb-4 border-primary">
+    <div class="card-body">
+      <h5 class="card-title">✏️ Edit your {{ draft.kind }}</h5>
+      <form action="{{ action_url }}" method="POST">
+        <input type="hidden" name="from_review" value="1">
+        <textarea class="form-control mb-3" name="content" rows="4" required>{{ draft.content }}</textarea>
+        <button type="submit" class="btn btn-primary">Check again &amp; {{ 'post' if draft.kind == 'post' else 'comment' }}</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="d-flex gap-2 justify-content-end">
+    <!-- Discard the draft completely -->
+    <form action="{{ url_for('cancel_draft') }}" method="POST">
+      <button type="submit" class="btn btn-light">Discard</button>
+    </form>
+
+    <!-- Mild issues only: the user may still publish; moderation will then
+         censor the problem parts. Severe drafts get no "post anyway". -->
+    {% if not severe %}
+    <form action="{{ action_url }}" method="POST">
+      <input type="hidden" name="from_review" value="1">
+      <input type="hidden" name="confirmed" value="1">
+      <input type="hidden" name="content" value="{{ draft.content }}">
+      <button type="submit" class="btn btn-outline-danger">Post anyway (it will be censored)</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
