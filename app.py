@@ -1,12 +1,13 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
 import json
+import math
 import sqlite3
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 app.secret_key = '123456789' 
@@ -95,6 +96,286 @@ REACTION_EMOJIS = {
 REACTION_TYPES = list(REACTION_EMOJIS.keys())
 
 
+# =====================================================================
+# CODING ASSIGNMENT 1: Contribution and Commitment
+#
+# Feature 1 - "Needs a reply" feed       -> Ch.2 Design Claim 1
+# Feature 2 - Weekly contribution goals  -> Ch.2 Design Claims 13, 14, 15
+# Feature 3 - "Return the favor" panel   -> Ch.3 Design Claim 31
+# =====================================================================
+
+def init_assignment1_db():
+    """
+    Creates the extra table and indexes the Assignment 1 features need.
+    Runs once when the app starts. 'IF NOT EXISTS' makes it safe to run
+    every time, so the existing database never has to be edited by hand.
+    """
+    db = sqlite3.connect(DATABASE)
+    # Feature 2: one row per user holding their current weekly goal.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS user_goals (
+            user_id       INTEGER PRIMARY KEY,
+            posts_goal    INTEGER NOT NULL,
+            comments_goal INTEGER NOT NULL,
+            updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+        )
+    ''')
+    # Features 1 and 3 run many "does this post have comments/reactions"
+    # lookups. Without these indexes every lookup scans the whole table.
+    db.execute('CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id)')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_comments_user ON comments(user_id)')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_reactions_post ON reactions(post_id)')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_reactions_user ON reactions(user_id)')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id)')
+    db.commit()
+    db.close()
+
+
+init_assignment1_db()
+
+
+# ---------- Version label (debug helper) ----------
+# Bump APP_VERSION whenever the code changes. The label at the top of every
+# page shows it together with the time the server started, so it is easy to
+# confirm that the browser is really showing the newest code.
+APP_VERSION = 'Assignment 1 - v1.1'
+SERVER_STARTED = datetime.now().strftime('%H:%M:%S')
+print(f' * MiniSocial {APP_VERSION} (server started {SERVER_STARTED})')
+
+
+@app.context_processor
+def inject_version():
+    """Makes the version label available in every template (shown in base.html.j2)."""
+    return {'app_version': APP_VERSION, 'server_started': SERVER_STARTED}
+
+
+# ---------- Feature 1: "Needs a reply" (Design Claim 1) ----------
+
+# SQL condition that is true when a post has no comments at all.
+# "Needed contribution" on MiniSocial = a reply to a post nobody has answered.
+UNANSWERED_CONDITION = "NOT EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id)"
+
+
+@app.context_processor
+def inject_unanswered_count():
+    """
+    Makes 'unanswered_count' available in every template, so the navbar
+    can always show how many posts are still waiting for a reply.
+    The user's own posts are excluded: you can't answer yourself.
+    """
+    user_id = session.get('user_id')
+    if not user_id:
+        return {'unanswered_count': 0}
+    row = query_db(
+        f"SELECT COUNT(*) AS cnt FROM posts p WHERE {UNANSWERED_CONDITION} AND p.user_id != ?",
+        (user_id,), one=True)
+    return {'unanswered_count': row['cnt'] if row else 0}
+
+
+def days_waiting(created_at):
+    """Returns how many whole days a post has existed (used for the 'waiting' badge)."""
+    if isinstance(created_at, str):
+        created_at = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+    if not isinstance(created_at, datetime):
+        return 0
+    return max(0, (datetime.utcnow() - created_at).days)
+
+
+# ---------- Feature 2: Weekly goals (Design Claims 13, 14, 15) ----------
+
+# Floors for the system-suggested goal, so new or inactive users still
+# get a goal that asks something of them (Claim 13: "highly challenging").
+MIN_SUGGESTED_POSTS = 3
+MIN_SUGGESTED_COMMENTS = 5
+GOAL_CHALLENGE_FACTOR = 1.5   # suggested goal = 150% of the user's usual weekly activity
+
+
+def current_week_bounds():
+    """
+    Returns (start, end) of the current goal week as UTC datetimes.
+    A week runs Monday 00:00 to the next Monday 00:00. The database stores
+    timestamps in UTC (CURRENT_TIMESTAMP), so UTC is used here too.
+    """
+    now = datetime.utcnow()
+    start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return start, start + timedelta(days=7)
+
+
+def to_sql_ts(dt):
+    """Formats a datetime the same way SQLite stores CURRENT_TIMESTAMP, so string comparison works."""
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def count_activity(user_id, since, until=None):
+    """Counts a user's posts and comments created in the time window [since, until)."""
+    until = until or datetime.utcnow() + timedelta(days=1)
+    args = (user_id, to_sql_ts(since), to_sql_ts(until))
+    posts = query_db('SELECT COUNT(*) AS cnt FROM posts WHERE user_id = ? AND created_at >= ? AND created_at < ?',
+                     args, one=True)['cnt']
+    comments = query_db('SELECT COUNT(*) AS cnt FROM comments WHERE user_id = ? AND created_at >= ? AND created_at < ?',
+                        args, one=True)['cnt']
+    return posts, comments
+
+
+def suggest_goal(user_id):
+    """
+    System-suggested goal (Claim 13 allows "self-set or system-suggested").
+    Takes the user's average weekly posts/comments over the last 4 full weeks
+    and raises it by 50%, so the goal is specific AND challenging, but still
+    based on what this particular user has shown they can do.
+    """
+    week_start, _ = current_week_bounds()
+    four_weeks_ago = week_start - timedelta(weeks=4)
+    posts, comments = count_activity(user_id, four_weeks_ago, week_start)
+    suggested_posts = max(MIN_SUGGESTED_POSTS, math.ceil(posts / 4 * GOAL_CHALLENGE_FACTOR))
+    suggested_comments = max(MIN_SUGGESTED_COMMENTS, math.ceil(comments / 4 * GOAL_CHALLENGE_FACTOR))
+    return {'posts': suggested_posts, 'comments': suggested_comments,
+            'avg_posts': round(posts / 4, 1), 'avg_comments': round(comments / 4, 1)}
+
+
+def get_goal_progress(user_id):
+    """
+    Builds everything the progress widgets need: the goal, this week's
+    counts, percentages and time left until the deadline.
+    Returns None if the user has not set a goal yet.
+    """
+    goal = query_db('SELECT posts_goal, comments_goal FROM user_goals WHERE user_id = ?', (user_id,), one=True)
+    if not goal:
+        return None
+
+    week_start, week_end = current_week_bounds()
+    posts_done, comments_done = count_activity(user_id, week_start)
+
+    # Deadline (Claim 14): time remaining until the week closes.
+    remaining = week_end - datetime.utcnow()
+    days_left = remaining.days
+    hours_left = remaining.seconds // 3600
+
+    def pct(done, target):
+        return min(100, round(done / target * 100)) if target else 100
+
+    posts_pct = pct(posts_done, goal['posts_goal'])
+    comments_pct = pct(comments_done, goal['comments_goal'])
+    return {
+        'posts_goal': goal['posts_goal'], 'comments_goal': goal['comments_goal'],
+        'posts_done': posts_done, 'comments_done': comments_done,
+        'posts_pct': posts_pct, 'comments_pct': comments_pct,
+        'days_left': days_left, 'hours_left': hours_left,
+        # Last 2 days of the week: the widget turns urgent (red/orange).
+        'deadline_close': days_left < 2,
+        'completed': posts_pct >= 100 and comments_pct >= 100,
+    }
+
+
+def community_comparison(user_id):
+    """
+    Compares the user's activity this week with every other member who
+    was active this week. Returns the community average and the share of
+    active members the user is ahead of.
+    """
+    week_start, _ = current_week_bounds()
+    since = to_sql_ts(week_start)
+    rows = query_db('''
+        SELECT user_id, COUNT(*) AS total FROM (
+            SELECT user_id FROM posts    WHERE created_at >= ?
+            UNION ALL
+            SELECT user_id FROM comments WHERE created_at >= ?
+        ) GROUP BY user_id
+    ''', (since, since))
+    totals = {r['user_id']: r['total'] for r in rows}
+    mine = totals.get(user_id, 0)
+    others = [t for uid, t in totals.items() if uid != user_id]
+    if not others:
+        return {'mine': mine, 'active_members': 0, 'avg': 0, 'ahead_pct': None}
+    ahead = sum(1 for t in others if mine > t)
+    return {'mine': mine, 'active_members': len(others),
+            'avg': round(sum(others) / len(others), 1),
+            'ahead_pct': round(ahead / len(others) * 100)}
+
+
+# ---------- Feature 3: "Return the favor" (Design Claim 31) ----------
+
+def get_favors_to_return(user_id, limit=3):
+    """
+    Finds members who engaged with MY posts (comments + reactions) more often
+    than I engaged with THEIR posts, i.e. people I "owe" a favor. For each,
+    picks their newest post I haven't commented on or reacted to yet, so the
+    feed can show a concrete, one-click way to return the favor.
+    """
+    # How many times each other user has engaged with my posts.
+    received = query_db('''
+        SELECT actor_id, SUM(n_comments) AS n_comments, SUM(n_reactions) AS n_reactions
+        FROM (
+            SELECT c.user_id AS actor_id, COUNT(*) AS n_comments, 0 AS n_reactions
+            FROM comments c JOIN posts p ON c.post_id = p.id
+            WHERE p.user_id = ? AND c.user_id != ?
+            GROUP BY c.user_id
+            UNION ALL
+            SELECT r.user_id, 0, COUNT(*)
+            FROM reactions r JOIN posts p ON r.post_id = p.id
+            WHERE p.user_id = ? AND r.user_id != ?
+            GROUP BY r.user_id
+        ) GROUP BY actor_id
+    ''', (user_id, user_id, user_id, user_id))
+
+    favors = []
+    for row in received:
+        actor_id = row['actor_id']
+        got = row['n_comments'] + row['n_reactions']
+
+        # How many times I engaged with this person's posts.
+        given = query_db('''
+            SELECT (SELECT COUNT(*) FROM comments c JOIN posts p ON c.post_id = p.id
+                    WHERE p.user_id = ? AND c.user_id = ?)
+                 + (SELECT COUNT(*) FROM reactions r JOIN posts p ON r.post_id = p.id
+                    WHERE p.user_id = ? AND r.user_id = ?) AS given
+        ''', (actor_id, user_id, actor_id, user_id), one=True)['given']
+
+        if given >= got:
+            continue  # Already even (or I gave more): nothing to return.
+
+        # Their newest post that I have not commented on or reacted to.
+        post = query_db('''
+            SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id
+            FROM posts p JOIN users u ON p.user_id = u.id
+            WHERE p.user_id = ?
+              AND NOT EXISTS (SELECT 1 FROM comments  c WHERE c.post_id = p.id AND c.user_id = ?)
+              AND NOT EXISTS (SELECT 1 FROM reactions r WHERE r.post_id = p.id AND r.user_id = ?)
+            ORDER BY p.created_at DESC LIMIT 1
+        ''', (actor_id, user_id, user_id), one=True)
+        if not post:
+            continue  # They have no post left that I could engage with.
+
+        post = dict(post)
+        post['content'], _ = moderate_content(post['content'])
+        favors.append({'post': post, 'n_comments': row['n_comments'],
+                       'n_reactions': row['n_reactions'], 'got': got, 'given': given,
+                       'owed': got - given})
+
+    # Biggest "debts" first, so the most generous members are shown first.
+    favors.sort(key=lambda f: f['owed'], reverse=True)
+    return favors[:limit]
+
+
+def favor_flash_if_returned(user_id, post_id):
+    """
+    Called after a comment/reaction. If the post's author had engaged with the
+    current user before, a flash message confirms the favor was returned,
+    reinforcing the reciprocity norm (Claim 31).
+    """
+    post = query_db('SELECT p.user_id, u.username FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+                    (post_id,), one=True)
+    if not post or post['user_id'] == user_id:
+        return
+    helped_me = query_db('''
+        SELECT 1 FROM comments c JOIN posts p ON c.post_id = p.id WHERE p.user_id = ? AND c.user_id = ?
+        UNION
+        SELECT 1 FROM reactions r JOIN posts p ON r.post_id = p.id WHERE p.user_id = ? AND r.user_id = ?
+    ''', (user_id, post['user_id'], user_id, post['user_id']), one=True)
+    if helped_me:
+        flash(f"🤝 You returned the favor to @{post['username']}!", 'info')
+
+
 @app.route('/')
 def feed():
     #  1. Get Pagination and Filter Parameters 
@@ -112,11 +393,20 @@ def feed():
     current_user_id = session.get('user_id')
     params = []
 
-    #  2. Build the Query 
-    where_clause = ""
+    #  2. Build the Query
+    # Conditions are collected in a list so filters can be combined.
+    conditions = []
     if show == 'following' and current_user_id:
-        where_clause = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
+        conditions.append("p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)")
         params.append(current_user_id)
+    elif show == 'unanswered':
+        # Assignment 1, Feature 1: only posts nobody has replied to yet.
+        conditions.append(UNANSWERED_CONDITION)
+        if current_user_id:
+            # Hide the user's own posts: they can't be the one to answer them.
+            conditions.append("p.user_id != ?")
+            params.append(current_user_id)
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     # Add the pagination parameters to the query arguments
     pagination_params = (POSTS_PER_PAGE, offset)
@@ -188,18 +478,30 @@ def feed():
             'reactions': reactions,
             'user_reaction': user_reaction,
             'followed_poster': followed_poster,
-            'comments': comments_moderated
+            'comments': comments_moderated,
+            # Assignment 1, Feature 1: data for the "No replies yet" badge.
+            'days_waiting': days_waiting(post_dict['created_at'])
         })
 
-    #  4. Render Template with Pagination Info 
-    return render_template('feed.html.j2', 
-                           posts=posts_data, 
+    #  3b. Assignment 1 widgets (only for logged-in users)
+    goal_progress = None
+    favors = []
+    if current_user_id:
+        goal_progress = get_goal_progress(current_user_id)   # Feature 2
+        if page == 1:
+            favors = get_favors_to_return(current_user_id)    # Feature 3
+
+    #  4. Render Template with Pagination Info
+    return render_template('feed.html.j2',
+                           posts=posts_data,
                            current_sort=sort,
                            current_show=show,
                            page=page, # Pass current page number
                            per_page=POSTS_PER_PAGE, # Pass items per page
                            reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+                           reaction_types=REACTION_TYPES,
+                           goal_progress=goal_progress,
+                           favors=favors)
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -499,6 +801,8 @@ def add_comment(post_id):
                    (post_id, user_id, content))
         db.commit()
         flash('Your comment was added.', 'success')
+        # Assignment 1, Feature 3: confirm when this comment returned a favor.
+        favor_flash_if_returned(user_id, post_id)
     else:
         flash('Comment cannot be empty.', 'warning')
 
@@ -574,6 +878,10 @@ def add_reaction():
                    (post_id, user_id, new_reaction_type))
 
     db.commit()
+
+    # Assignment 1, Feature 3: confirm when a NEW reaction returned a favor.
+    if not existing_reaction:
+        favor_flash_if_returned(user_id, post_id)
 
     return redirect(request.referrer or url_for('feed'))
 
@@ -856,6 +1164,56 @@ def admin_delete_comment(comment_id):
 def rules():
     return render_template('rules.html.j2')
 
+
+# ---------- Assignment 1, Feature 2: the "My Goals" page ----------
+@app.route('/goals', methods=['GET', 'POST'])
+def goals():
+    """
+    GET  shows the user's weekly goal, progress, deadline, the system's
+         suggested goal and a comparison with the rest of the community.
+    POST saves a new self-set goal, or the suggested one.
+    """
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to set goals.', 'danger')
+        return redirect(url_for('login'))
+
+    suggestion = suggest_goal(user_id)
+
+    if request.method == 'POST':
+        if request.form.get('use_suggested'):
+            posts_goal, comments_goal = suggestion['posts'], suggestion['comments']
+        else:
+            try:
+                posts_goal = int(request.form.get('posts_goal', 0))
+                comments_goal = int(request.form.get('comments_goal', 0))
+            except ValueError:
+                flash('Goals must be whole numbers.', 'warning')
+                return redirect(url_for('goals'))
+            # A goal of 0 is not a goal, and a huge number is not realistic.
+            if not (1 <= posts_goal <= 100 and 1 <= comments_goal <= 200):
+                flash('Choose between 1-100 posts and 1-200 comments per week.', 'warning')
+                return redirect(url_for('goals'))
+
+        # Insert or replace the user's single goal row (SQLite "upsert").
+        db = get_db()
+        db.execute('''
+            INSERT INTO user_goals (user_id, posts_goal, comments_goal, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                posts_goal = excluded.posts_goal,
+                comments_goal = excluded.comments_goal,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (user_id, posts_goal, comments_goal))
+        db.commit()
+        flash(f'Goal saved: {posts_goal} posts and {comments_goal} comments this week. Go for it!', 'success')
+        return redirect(url_for('goals'))
+
+    return render_template('goals.html.j2',
+                           progress=get_goal_progress(user_id),
+                           suggestion=suggestion,
+                           comparison=community_comparison(user_id))
+
 @app.template_global()
 def loop_color(user_id):
     # Generate a pastel color based on user_id hash
@@ -940,4 +1298,3 @@ def recommend(user_id, filter_following):
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
-

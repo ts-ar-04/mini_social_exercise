@@ -1,0 +1,95 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{#
+  Assignment 1, Feature 2: Weekly contribution goals.
+  Design Claim 13: specific, challenging goals (self-set OR system-suggested)
+  Design Claim 14: goals coupled with a deadline (end of the week)
+  Design Claim 15: frequent feedback on progress (progress bars + comparison)
+#}
+
+<div class="col-md-8 mx-auto">
+  <h2 class="text-center border-bottom pb-2 mb-4">🎯 My Weekly Goals</h2>
+
+  <!-- 1. Current progress towards the goal (feedback + deadline) -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <h5 class="card-title">This week</h5>
+      {% if progress %}
+        {% if progress.completed %}
+          <div class="alert alert-success">🎉 You reached your goal this week! Consider raising it for next week.</div>
+        {% else %}
+          <p class="{% if progress.deadline_close %}text-danger fw-bold{% endif %}">
+            ⏳ {{ progress.days_left }} days {{ progress.hours_left }} hours left until the week closes (Sunday midnight, UTC).
+            You need <strong>{{ [progress.posts_goal - progress.posts_done, 0]|max }} more posts</strong>
+            and <strong>{{ [progress.comments_goal - progress.comments_done, 0]|max }} more comments</strong>.
+          </p>
+        {% endif %}
+
+        <label class="form-label mb-0">Posts: {{ progress.posts_done }} / {{ progress.posts_goal }}</label>
+        <div class="progress mb-3" style="height: 20px;">
+          <div class="progress-bar {% if progress.posts_pct >= 100 %}bg-success{% endif %}" style="width: {{ progress.posts_pct }}%;">{{ progress.posts_pct }}%</div>
+        </div>
+        <label class="form-label mb-0">Comments: {{ progress.comments_done }} / {{ progress.comments_goal }}</label>
+        <div class="progress mb-1" style="height: 20px;">
+          <div class="progress-bar {% if progress.comments_pct >= 100 %}bg-success{% endif %}" style="width: {{ progress.comments_pct }}%;">{{ progress.comments_pct }}%</div>
+        </div>
+      {% else %}
+        <p class="text-muted mb-0">You don't have a goal yet. Pick the suggested one or set your own below.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 2. How the user compares to other members this week -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <h5 class="card-title">📊 You vs. the community (this week)</h5>
+      {% if comparison.active_members %}
+        <p class="mb-1">Your contributions: <strong>{{ comparison.mine }}</strong> (posts + comments)</p>
+        <p class="mb-1">Average of the {{ comparison.active_members }} other active members: <strong>{{ comparison.avg }}</strong></p>
+        <p class="mb-0">You are ahead of <strong>{{ comparison.ahead_pct }}%</strong> of active members.</p>
+      {% else %}
+        <p class="mb-0">Nobody else has posted or commented this week yet. Be the first!</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 3. System-suggested goal (based on the user's own history) -->
+  <div class="card shadow-sm mb-4 border-primary">
+    <div class="card-body">
+      <h5 class="card-title">💡 Suggested goal</h5>
+      <p class="mb-2">
+        Over the last 4 weeks you averaged <strong>{{ suggestion.avg_posts }}</strong> posts and
+        <strong>{{ suggestion.avg_comments }}</strong> comments per week.
+        A challenging goal for you is:
+        <strong>{{ suggestion.posts }} posts</strong> and <strong>{{ suggestion.comments }} comments</strong> this week.
+      </p>
+      <form method="POST" action="{{ url_for('goals') }}">
+        <input type="hidden" name="use_suggested" value="1">
+        <button type="submit" class="btn btn-primary">Accept suggested goal</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- 4. Self-set goal -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <h5 class="card-title">✏️ Set your own goal</h5>
+      <form method="POST" action="{{ url_for('goals') }}" class="row g-3 align-items-end">
+        <div class="col-sm-4">
+          <label for="posts_goal" class="form-label">Posts per week</label>
+          <input type="number" class="form-control" id="posts_goal" name="posts_goal" min="1" max="100"
+                 value="{{ progress.posts_goal if progress else suggestion.posts }}" required>
+        </div>
+        <div class="col-sm-4">
+          <label for="comments_goal" class="form-label">Comments per week</label>
+          <input type="number" class="form-control" id="comments_goal" name="comments_goal" min="1" max="200"
+                 value="{{ progress.comments_goal if progress else suggestion.comments }}" required>
+        </div>
+        <div class="col-sm-4">
+          <button type="submit" class="btn btn-success w-100">Save my goal</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

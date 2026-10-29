@@ -20,6 +20,82 @@
     </div>
   </div>
 </div>
+
+<!-- ===== Assignment 1, Feature 2: weekly goal progress (Design Claims 13-15) ===== -->
+<div class="col-md-8 mx-auto mb-4">
+  {% if goal_progress %}
+  <div class="card shadow-sm {% if goal_progress.completed %}border-success{% elif goal_progress.deadline_close %}border-danger{% endif %}">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="card-title mb-0">🎯 This week's goal</h5>
+        <!-- Deadline countdown (Claim 14) -->
+        {% if goal_progress.completed %}
+          <span class="badge text-bg-success">Goal reached 🎉</span>
+        {% else %}
+          <span class="badge {% if goal_progress.deadline_close %}text-bg-danger{% else %}text-bg-secondary{% endif %}">
+            ⏳ {{ goal_progress.days_left }}d {{ goal_progress.hours_left }}h left
+          </span>
+        {% endif %}
+      </div>
+      <!-- Progress bars give continuous feedback (Claim 15) -->
+      <small>Posts: {{ goal_progress.posts_done }} / {{ goal_progress.posts_goal }}</small>
+      <div class="progress mb-2" style="height: 14px;">
+        <div class="progress-bar {% if goal_progress.posts_pct >= 100 %}bg-success{% endif %}" style="width: {{ goal_progress.posts_pct }}%;">{{ goal_progress.posts_pct }}%</div>
+      </div>
+      <small>Comments: {{ goal_progress.comments_done }} / {{ goal_progress.comments_goal }}</small>
+      <div class="progress mb-2" style="height: 14px;">
+        <div class="progress-bar {% if goal_progress.comments_pct >= 100 %}bg-success{% endif %}" style="width: {{ goal_progress.comments_pct }}%;">{{ goal_progress.comments_pct }}%</div>
+      </div>
+      <a href="{{ url_for('goals') }}" class="small">Details and community comparison →</a>
+    </div>
+  </div>
+  {% else %}
+  <!-- No goal yet: invite the user to set one -->
+  <div class="alert alert-info d-flex justify-content-between align-items-center mb-0">
+    <span>🎯 You haven't set a weekly goal yet. Members with a goal contribute more!</span>
+    <a href="{{ url_for('goals') }}" class="btn btn-sm btn-primary">Set a goal</a>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ===== Assignment 1, Feature 3: "Return the favor" (Design Claim 31) ===== -->
+{% if favors %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="card shadow-sm border-warning">
+    <div class="card-body">
+      <h5 class="card-title">🤝 Return the favor</h5>
+      <p class="text-muted small mb-3">These members engaged with your posts. Show them some love back!</p>
+      {% for favor in favors %}
+      <div class="border rounded p-2 mb-2">
+        <!-- Who helped me, and how much (the specific "favor" to return) -->
+        <div class="small mb-1">
+          <strong><a href="{{ url_for('user_profile', username=favor.post.username) }}">@{{ favor.post.username }}</a></strong>
+          {% if favor.n_comments %}commented {{ favor.n_comments }}×{% endif %}
+          {% if favor.n_comments and favor.n_reactions %} and {% endif %}
+          {% if favor.n_reactions %}reacted {{ favor.n_reactions }}×{% endif %}
+          on your posts. You've engaged with theirs {{ favor.given }}×.
+        </div>
+        <!-- Their newest post I haven't engaged with yet -->
+        <p class="mb-2 fst-italic">"{{ favor.post.content|truncate(140) }}"</p>
+        <div class="d-flex gap-2 align-items-center">
+          <!-- One-click reaction: reuses the existing /react route -->
+          <form action="{{ url_for('add_reaction') }}" method="POST" class="d-inline">
+            <input type="hidden" name="post_id" value="{{ favor.post.id }}">
+            <input type="hidden" name="reaction" value="like">
+            <button type="submit" class="btn btn-sm btn-light">❤️ Like</button>
+          </form>
+          <!-- Quick reply: reuses the existing comment route -->
+          <form action="{{ url_for('add_comment', post_id=favor.post.id) }}" method="POST" class="d-flex flex-grow-1 gap-2">
+            <input type="text" name="content" class="form-control form-control-sm" placeholder="Reply to @{{ favor.post.username }}…" required>
+            <button type="submit" class="btn btn-sm btn-warning">Reply</button>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
 {% endif %}
 
 <h2 class="text-center border-bottom pb-2 mb-4"><span>Posts</span></h2>
@@ -41,11 +117,24 @@
     <!-- The link preserves the current_sort state -->
     <a href="{{ url_for('feed', sort=current_sort, show='all') }}" class="btn {% if current_show == 'all' %}btn-primary{% else %}btn-light{% endif %}">All</a>
     <a href="{{ url_for('feed', sort=current_sort, show='following') }}" class="btn {% if current_show == 'following' %}btn-primary{% else %}btn-light{% endif %}">Following</a>
+    <!-- Assignment 1, Feature 1: filter that lists only the posts that still need a reply -->
+    <a href="{{ url_for('feed', sort=current_sort, show='unanswered') }}" class="btn {% if current_show == 'unanswered' %}btn-danger{% else %}btn-light{% endif %}">💬 Needs a reply ({{ unanswered_count }})</a>
   </div>
    {% endif %}
 
-  
+
 </div>
+
+<!-- Assignment 1, Feature 1: explain what the "needed contribution" is in this view -->
+{% if current_show == 'unanswered' %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="alert alert-warning mb-0">
+    <strong>{{ unanswered_count }} posts are still waiting for their first reply.</strong>
+    Every post here was written by a member hoping for a response. Pick one and be the first to reply,
+    once you comment, the post leaves this list.
+  </div>
+</div>
+{% endif %}
 
 <div class="col-md-8 mx-auto">
   {% for entry in posts %}
@@ -77,6 +166,14 @@
       </div>
       
       <p class="mt-2">{{ entry.post.content }}</p>
+
+      <!-- Assignment 1, Feature 1: highlight posts that still need their first reply -->
+      {% if not entry.comments and session.get('user_id') and session.get('user_id') != entry.post.user_id %}
+      <div class="alert alert-warning py-1 px-2 small d-flex justify-content-between align-items-center">
+        <span>💬 No replies yet{% if entry.days_waiting %}, waiting {{ entry.days_waiting }} day{{ 's' if entry.days_waiting != 1 }}{% endif %}. Be the first!</span>
+        <button class="btn btn-sm btn-warning py-0" data-bs-toggle="modal" data-bs-target="#addCommentModal-{{ entry.post.id }}">Reply</button>
+      </div>
+      {% endif %}
 
       <!-- Reactions Display and Add Reaction Button -->
       <div class="d-flex align-items-center mt-2 mb-2">

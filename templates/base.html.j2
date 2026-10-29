@@ -17,6 +17,11 @@
 </head>
 <body class="bg-light">
 
+<!-- Version label: confirms which version of the code the server is running -->
+<div class="text-center small py-1" style="background:#fff3cd; border-bottom:1px solid #ffe69c;">
+  🛠 {{ app_version }} · server started {{ server_started }}
+</div>
+
 <!-- Bootstrap Navbar -->
 <nav class="navbar navbar-expand-lg bg-body-tertiary shadow-sm">
   <div class="container-fluid px-lg-5">
@@ -49,6 +54,17 @@
 
         <!-- Check if user is logged in -->
         {% if session.get('user_id') %}
+          <!-- Assignment 1, Feature 1: always-visible count of posts waiting for a reply -->
+          <li class="nav-item">
+            <a class="nav-link" href="{{ url_for('feed', show='unanswered') }}" title="Posts nobody has replied to yet">
+              💬 Needs a reply
+              {% if unanswered_count %}<span class="badge rounded-pill text-bg-danger">{{ unanswered_count }}</span>{% endif %}
+            </a>
+          </li>
+          <!-- Assignment 1, Feature 2: weekly goals page -->
+          <li class="nav-item">
+            <a class="nav-link" href="{{ url_for('goals') }}">🎯 My Goals</a>
+          </li>
           <!-- If logged in, show User Dropdown Menu -->
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle" href="#" id="navbarUserDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -130,4 +146,3 @@
         });
     });
 </script>
-
