@@ -96,6 +96,54 @@
   </div>
 </div>
 {% endif %}
+
+<!-- ===== Assignment 3, Feature B: reminder to introduce yourself (Design Claim 19) ===== -->
+{% if show_intro_prompt %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="alert alert-success d-flex justify-content-between align-items-center mb-0">
+    <span>🌱 You're new here! Tell the community a bit about yourself so members can say hi.</span>
+    <a href="{{ url_for('introduce') }}" class="btn btn-sm btn-success">Introduce yourself</a>
+  </div>
+</div>
+{% endif %}
+
+<!-- ===== Assignment 3, Feature A: welcome new members (Design Claim 18) ===== -->
+{% if newcomers %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="card shadow-sm border-success">
+    <div class="card-body">
+      <h5 class="card-title">🌱 Say hi to our newest members</h5>
+      <p class="text-muted small mb-3">They joined in the last two weeks. A friendly first reply makes newcomers much more likely to stay.</p>
+      {% for n in newcomers %}
+      <div class="border rounded p-2 mb-2">
+        <div class="small mb-1">
+          <strong><a href="{{ url_for('user_profile', username=n.username) }}">@{{ n.username }}</a></strong>
+          <span class="badge text-bg-success">New member</span>
+          joined {% if n.days == 0 %}today{% else %}{{ n.days }} day{{ 's' if n.days != 1 }} ago{% endif %}
+          {% if n.replies_received == 0 %}· <span class="text-danger">nobody has replied to them yet</span>{% endif %}
+        </div>
+        {% if n.profile %}<p class="small text-muted mb-1">"{{ n.profile|truncate(120) }}"</p>{% endif %}
+        {% if n.post %}
+          <p class="mb-2 fst-italic">"{{ n.post.content|truncate(140) }}"</p>
+          {% if n.already_welcomed %}
+            <span class="small text-success">✓ You already welcomed @{{ n.username }}</span>
+          {% else %}
+          <!-- Friendly reply, pre-filled but editable; reuses the normal comment route -->
+          <form action="{{ url_for('add_comment', post_id=n.post.id) }}" method="POST" class="d-flex gap-2">
+            <input type="text" name="content" class="form-control form-control-sm"
+                   value="Welcome to MiniSocial, @{{ n.username }}! 👋 Glad to have you here." required>
+            <button type="submit" class="btn btn-sm btn-success text-nowrap">👋 Welcome</button>
+          </form>
+          {% endif %}
+        {% else %}
+          <p class="small text-muted mb-0">Hasn't posted yet. <a href="{{ url_for('user_profile', username=n.username) }}">Visit their profile</a>.</p>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
 {% endif %}
 
 <h2 class="text-center border-bottom pb-2 mb-4"><span>Posts</span></h2>
@@ -165,7 +213,20 @@
         {% endif %}
       </div>
       
+      <!-- Assignment 3, Feature A/B: newcomer and introduction badges -->
+      {% if entry.post.is_newcomer or entry.post.is_intro %}
+      <div class="mt-1">
+        {% if entry.post.is_newcomer %}<span class="badge text-bg-success">🌱 New member</span>{% endif %}
+        {% if entry.post.is_intro %}<span class="badge text-bg-info">👋 Introduction</span>{% endif %}
+      </div>
+      {% endif %}
+
       <p class="mt-2">{{ entry.post.content }}</p>
+
+      <!-- Assignment 3.1: why this post was recommended -->
+      {% if current_sort == 'recommended' and entry.post.reason %}
+      <p class="small text-primary mb-2">💡 {{ entry.post.reason }}</p>
+      {% endif %}
 
       <!-- Assignment 1, Feature 1: highlight posts that still need their first reply -->
       {% if not entry.comments and session.get('user_id') and session.get('user_id') != entry.post.user_id %}

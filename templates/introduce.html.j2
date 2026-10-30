@@ -1,0 +1,52 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{#
+  Assignment 3, Feature B - Design Claim 19 (Chapter 5):
+  "Encouraging newcomers to reveal themselves publicly in profiles or
+   introduction threads gives existing group members a basis for
+   conversation and reciprocation with them and increases interaction
+   between old-timers and newcomers."
+#}
+
+<div class="col-md-8 mx-auto">
+  <h2 class="text-center border-bottom pb-2 mb-3">👋 Introduce yourself, {{ user.username }}</h2>
+  <p class="text-center text-muted mb-4">
+    Members who say a little about themselves get replies much sooner.
+    Your bio goes on your profile, and your hello is posted on the feed with
+    <strong>#Introduction</strong> so others can welcome you.
+  </p>
+
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <form method="POST" action="{{ url_for('introduce') }}">
+        <!-- 1. Public profile bio -->
+        <div class="mb-3">
+          <label for="profile" class="form-label fw-bold">Short bio (shown on your profile)</label>
+          <textarea class="form-control" id="profile" name="profile" rows="2" maxlength="300"
+                    placeholder="e.g. CS student in Oulu, coffee addict, weekend hiker." required>{{ form.get('profile', '') }}</textarea>
+        </div>
+
+        <!-- 2. Interests become hashtags, so people with the same interests find you -->
+        <div class="mb-3">
+          <label for="interests" class="form-label fw-bold">Your interests <span class="fw-normal text-muted">(comma separated)</span></label>
+          <input type="text" class="form-control" id="interests" name="interests"
+                 placeholder="e.g. DIY, hiking, photography" value="{{ form.get('interests', '') }}">
+          <div class="form-text">They become hashtags in your introduction post.</div>
+        </div>
+
+        <!-- 3. Hello message: published as the introduction post -->
+        <div class="mb-3">
+          <label for="hello" class="form-label fw-bold">Say hello to the community</label>
+          <textarea class="form-control" id="hello" name="hello" rows="3" maxlength="400"
+                    placeholder="Hi everyone! I just joined because..." required>{{ form.get('hello', '') }}</textarea>
+        </div>
+
+        <div class="d-flex justify-content-between align-items-center">
+          <a href="{{ url_for('feed') }}" class="text-muted small">Skip for now</a>
+          <button type="submit" class="btn btn-success">Post my introduction</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

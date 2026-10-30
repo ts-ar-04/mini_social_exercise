@@ -138,7 +138,7 @@ init_assignment1_db()
 # Bump APP_VERSION whenever the code changes. The label at the top of every
 # page shows it together with the time the server started, so it is easy to
 # confirm that the browser is really showing the newest code.
-APP_VERSION = 'Assignment 2 - v2.0'
+APP_VERSION = 'Assignment 3 - v3.0'
 SERVER_STARTED = datetime.now().strftime('%H:%M:%S')
 print(f' * MiniSocial {APP_VERSION} (server started {SERVER_STARTED})')
 
@@ -473,6 +473,10 @@ def feed():
             comment_dict = dict(comment)
             comment_dict['content'], _ = moderate_content(comment_dict['content'])
             comments_moderated.append(comment_dict)
+        # Assignment 3, Feature A: mark posts by new members and introductions.
+        author = query_db('SELECT created_at FROM users WHERE id = ?', (post_dict['user_id'],), one=True)
+        post_dict['is_newcomer'] = bool(author) and is_newcomer(author['created_at'])
+        post_dict['is_intro'] = INTRO_HASHTAG.lower() in (post_dict['content'] or '').lower()
         posts_data.append({
             'post': post_dict,
             'reactions': reactions,
@@ -486,7 +490,12 @@ def feed():
     #  3b. Assignment 1 widgets (only for logged-in users)
     goal_progress = None
     favors = []
+    newcomers = []             # Assignment 3, Feature A
+    show_intro_prompt = False  # Assignment 3, Feature B
     if current_user_id:
+        if page == 1:
+            newcomers = get_newcomers_to_welcome(current_user_id)
+        show_intro_prompt = needs_introduction(current_user_id)
         goal_progress = get_goal_progress(current_user_id)   # Feature 2
         if page == 1:
             favors = get_favors_to_return(current_user_id)    # Feature 3
@@ -501,7 +510,9 @@ def feed():
                            reaction_emojis=REACTION_EMOJIS,
                            reaction_types=REACTION_TYPES,
                            goal_progress=goal_progress,
-                           favors=favors)
+                           favors=favors,
+                           newcomers=newcomers,
+                           show_intro_prompt=show_intro_prompt)
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -751,7 +762,9 @@ def signup():
 
             # 3. Flash a welcome message and redirect to the feed.
             flash(f'Welcome, {username}! Your account has been created.', 'success')
-            return redirect(url_for('feed')) # Redirect to the main feed/dashboard
+            # Assignment 3, Feature B (Design Claim 19): send new members to
+            # the "Introduce yourself" page right after joining.
+            return redirect(url_for('introduce'))
 
         except sqlite3.IntegrityError:
             flash('Username already taken. Please choose another one.', 'danger')
@@ -1539,6 +1552,199 @@ def moderate_content(content):
 
     return moderated_content, score
 
+# =====================================================================
+# CODING ASSIGNMENT 3: Dealing with newcomers
+#
+# 3.1 recommend()                         -> content + social recommender
+# Feature A "Welcome new members" panel   -> Ch.5 Design Claim 18
+# Feature B "Introduce yourself" page     -> Ch.5 Design Claim 19
+# =====================================================================
+
+# ---------- 3.1 Recommendation helpers ----------
+RECOMMEND_COUNT = 5
+# Reactions that mean "I liked this". sad/angry are not positive signals.
+POSITIVE_REACTIONS = ('like', 'love', 'haha', 'laugh', 'wow')
+HASHTAG_WEIGHT = 2        # hashtags describe the topic better than normal words
+AUTHOR_LIKE_WEIGHT = 1.0  # per earlier liked post by the same author (max 3)
+FOLLOW_WEIGHT = 2.0       # the user follows the author
+POPULARITY_WEIGHT = 0.05  # tiny tie-breaker: total reactions on the post
+MIN_CONTENT_SCORE = 1.0   # weaker keyword overlaps are treated as "no match"
+
+# Common words that say nothing about a topic.
+STOPWORDS = set('''the and for that this with you your are was were have has had not but
+all can just out get got about what when they them their there from into been
+will would could should more most some any our its it's i'm my me we so too very
+really one new like day time today make made now how why who did does doing see
+'''.split())
+
+
+def extract_keywords(text):
+    """
+    Turns a post into topic keywords (lowercase).
+    - Normal words: 3+ letters, stopwords removed, weight 1.
+    - Hashtags are split on capitals ("#DIYLife" -> "diy", "life") and the
+      whole tag is kept too ("diylife"); hashtag keywords count HASHTAG_WEIGHT
+      times, because they are the author's own label for the topic.
+    Returns a list (repeats = weight).
+    """
+    if not text:
+        return []
+    keywords = []
+    for tag in re.findall(r'#(\w+)', text):
+        parts = re.findall(r'[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+', tag)
+        for word in set([tag.lower()] + [p.lower() for p in parts]):
+            if len(word) >= 3 and word not in STOPWORDS:
+                keywords += [word] * HASHTAG_WEIGHT
+    without_tags = re.sub(r'#\w+', ' ', text)
+    for word in re.findall(r"[a-zA-Z']+", without_tags):
+        word = word.lower().strip("'")
+        if len(word) >= 3 and word not in STOPWORDS:
+            keywords.append(word)
+    return keywords
+
+
+def popular_fallback(user_id, filter_following, limit):
+    """
+    Used when there is no personal signal (cold start) or too few matches:
+    the most-reacted posts the user hasn't written or reacted to yet.
+    """
+    query = '''
+        SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id
+        FROM posts p JOIN users u ON u.id = p.user_id
+        LEFT JOIN (SELECT post_id, COUNT(*) AS n FROM reactions GROUP BY post_id) r ON r.post_id = p.id
+        WHERE p.user_id != ?
+          AND NOT EXISTS (SELECT 1 FROM reactions x WHERE x.post_id = p.id AND x.user_id = ?)
+    '''
+    args = [user_id or -1, user_id or -1]
+    if filter_following and user_id:
+        query += ' AND p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)'
+        args.append(user_id)
+    query += ' ORDER BY IFNULL(r.n, 0) DESC, p.created_at DESC LIMIT ?'
+    args.append(limit)
+    posts = [dict(p) for p in query_db(query, args)]
+    for p in posts:
+        p['reason'] = 'Popular in the community'
+    posts.sort(key=lambda p: str(p['created_at']), reverse=True)
+    return posts
+
+
+def recommendation_reason(post, shared, interest, liked_authors, followed, idf):
+    """Short human-readable explanation shown under a recommended post."""
+    if shared:
+        top = sorted(shared, key=lambda k: interest[k] * idf(k), reverse=True)[:3]
+        return 'Because you liked posts about ' + ', '.join('#' + k for k in top)
+    if liked_authors[post['user_id']]:
+        return f"Because you liked other posts by @{post['username']}"
+    if post['user_id'] in followed:
+        return f"Because you follow @{post['username']}"
+    return 'Popular in the community'
+
+
+# ---------- Feature A & B: newcomer helpers ----------
+NEWCOMER_DAYS = 14             # an account younger than this is a "new member"
+INTRO_HASHTAG = '#Introduction'
+
+
+def is_newcomer(created_at):
+    """True if an account was created less than NEWCOMER_DAYS ago."""
+    return account_age_days(created_at) < NEWCOMER_DAYS
+
+
+def get_newcomers_to_welcome(current_user_id, limit=3):
+    """
+    Feature A (Design Claim 18). Finds members who joined in the last
+    NEWCOMER_DAYS days, with their latest post and how many replies they have
+    received from others. Members nobody has talked to yet come first, so
+    friendly replies go where they matter most.
+    """
+    since = to_sql_ts(datetime.utcnow() - timedelta(days=NEWCOMER_DAYS))
+    newcomers = query_db('''
+        SELECT u.id, u.username, u.profile, u.created_at,
+               (SELECT COUNT(*) FROM comments c JOIN posts p ON p.id = c.post_id
+                 WHERE p.user_id = u.id AND c.user_id != u.id) AS replies_received
+        FROM users u
+        WHERE u.created_at >= ? AND u.id != ? AND u.username != 'admin'
+        ORDER BY replies_received ASC, u.created_at DESC
+        LIMIT ?
+    ''', (since, current_user_id or -1, limit))
+
+    result = []
+    for user in newcomers:
+        # Prefer their introduction post; otherwise their newest post.
+        post = query_db('''
+            SELECT id, content FROM posts WHERE user_id = ?
+            ORDER BY (content LIKE ?) DESC, created_at DESC LIMIT 1
+        ''', (user['id'], '%' + INTRO_HASHTAG + '%'), one=True)
+        already_welcomed = bool(post) and bool(query_db(
+            'SELECT 1 FROM comments WHERE post_id = ? AND user_id = ?',
+            (post['id'], current_user_id), one=True))
+        profile, _ = moderate_content(user['profile'])
+        result.append({
+            'username': user['username'],
+            'profile': profile,
+            'days': account_age_days(user['created_at']),
+            'replies_received': user['replies_received'],
+            'post': ({'id': post['id'], 'content': moderate_content(post['content'])[0]} if post else None),
+            'already_welcomed': already_welcomed,
+        })
+    return result
+
+
+def needs_introduction(user_id):
+    """
+    Feature B (Design Claim 19). A newcomer with no profile text or no
+    #Introduction post yet is reminded on the feed to introduce themselves.
+    """
+    user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user or not is_newcomer(user['created_at']):
+        return False
+    has_intro = query_db('SELECT 1 FROM posts WHERE user_id = ? AND content LIKE ?',
+                         (user_id, '%' + INTRO_HASHTAG + '%'), one=True)
+    return not has_intro or not (user['profile'] or '').strip()
+
+
+@app.route('/introduce', methods=['GET', 'POST'])
+def introduce():
+    """
+    Feature B (Design Claim 19): "Introduce yourself" onboarding page.
+    New members write a short bio (saved to their public profile) and a hello
+    message that is published as a post tagged #Introduction, so existing
+    members have something to start a conversation about.
+    """
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    user = query_db('SELECT username, profile FROM users WHERE id = ?', (user_id,), one=True)
+
+    if request.method == 'POST':
+        bio = (request.form.get('profile') or '').strip()
+        interests = (request.form.get('interests') or '').strip()
+        hello = (request.form.get('hello') or '').strip()
+        if not bio or not hello:
+            flash('Please fill in both your bio and your hello message.', 'warning')
+            return render_template('introduce.html.j2', user=user, form=request.form)
+        # Same moderation as everywhere else: an introduction must follow the rules.
+        for text in (bio, interests, hello):
+            if moderate_content(text)[1] > 0:
+                flash('Part of your introduction breaks the community rules. Please edit it.', 'danger')
+                return render_template('introduce.html.j2', user=user, form=request.form)
+
+        # Turn "diy, hiking" into "#diy #hiking" so the recommender and other
+        # members can find people with the same interests.
+        words = [re.sub(r'\W', '', w) for w in re.split(r'[,\s]+', interests)]
+        tags = ' '.join('#' + w for w in words if w)
+        intro_post = f"👋 {hello} {tags} {INTRO_HASHTAG}".replace('  ', ' ').strip()
+
+        db = get_db()
+        db.execute('UPDATE users SET profile = ? WHERE id = ?', (bio, user_id))
+        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)', (user_id, intro_post))
+        db.commit()
+        flash('Thanks for introducing yourself! Your introduction is now on the feed.', 'success')
+        return redirect(url_for('feed'))
+
+    return render_template('introduce.html.j2', user=user, form={'profile': user['profile'] or ''})
+
+
 # Coding Assignment #3
 # Assignment 3.1
 def recommend(user_id, filter_following):
@@ -1561,9 +1767,90 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    # --- Assignment 3.1: hybrid recommender (content-based + social) ---
+    # No logged-in user: nothing to personalise, show what the community likes.
+    if not user_id:
+        return popular_fallback(None, filter_following, RECOMMEND_COUNT)
 
-    return recommended_posts;
+    # ---- Step 1: build the user's interest profile ----
+    # Posts the user reacted to POSITIVELY are the signal of what they like.
+    placeholders = ','.join('?' * len(POSITIVE_REACTIONS))
+    liked = query_db(f'''
+        SELECT p.id, p.content, p.user_id FROM reactions r JOIN posts p ON p.id = r.post_id
+        WHERE r.user_id = ? AND r.reaction_type IN ({placeholders})
+    ''', (user_id, *POSITIVE_REACTIONS))
+    followed = {r['followed_id'] for r in
+                query_db('SELECT followed_id FROM follows WHERE follower_id = ?', (user_id,))}
+
+    # Cold start: the user has not liked or followed anything yet.
+    if not liked and not followed:
+        return popular_fallback(user_id, filter_following, RECOMMEND_COUNT)
+
+    # Keyword profile: how often each keyword appears in the liked posts.
+    interest = collections.Counter()
+    for post in liked:
+        interest.update(extract_keywords(post['content']))
+    # Author affinity: how many of an author's posts the user liked.
+    liked_authors = collections.Counter(post['user_id'] for post in liked)
+
+    # ---- Step 2: candidate posts ----
+    # Everything the user has not written and not already reacted to.
+    candidates = query_db('''
+        SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id,
+               (SELECT COUNT(*) FROM reactions r2 WHERE r2.post_id = p.id) AS n_reactions
+        FROM posts p JOIN users u ON u.id = p.user_id
+        WHERE p.user_id != ?
+          AND NOT EXISTS (SELECT 1 FROM reactions r WHERE r.post_id = p.id AND r.user_id = ?)
+    ''', (user_id, user_id))
+    if filter_following:
+        candidates = [c for c in candidates if c['user_id'] in followed]
+
+    # ---- Step 3: score every candidate ----
+    # IDF (inverse document frequency): a keyword that appears in few posts
+    # (e.g. "diy") says much more about a topic than one that appears
+    # everywhere (e.g. "life"), so rare keywords get a bigger weight.
+    all_posts = query_db('SELECT content FROM posts')
+    doc_freq = collections.Counter()
+    for p in all_posts:
+        doc_freq.update(set(extract_keywords(p['content'])))
+    idf = lambda k: math.log(len(all_posts) / (1 + doc_freq[k]))
+
+    scored = []
+    for post in candidates:
+        keywords = set(extract_keywords(post['content']))
+        shared = [k for k in keywords if k in interest]
+        # Content similarity (TF-IDF style): for every shared keyword,
+        # how much the user likes it x how rare it is. Divided by
+        # sqrt(length) so long posts don't win just by being long.
+        content_score = sum(interest[k] * idf(k) for k in shared) / math.sqrt(len(keywords) + 1)
+        # Social signals: liked this author before / follows this author.
+        social_score = AUTHOR_LIKE_WEIGHT * min(liked_authors[post['user_id']], 3)
+        if post['user_id'] in followed:
+            social_score += FOLLOW_WEIGHT
+        # Small popularity tie-breaker.
+        score = content_score + social_score + POPULARITY_WEIGHT * post['n_reactions']
+        if content_score > MIN_CONTENT_SCORE or social_score > 0:
+            scored.append((score, post, shared))
+
+    # ---- Step 4: top 5, with an explanation for each ----
+    scored.sort(key=lambda item: item[0], reverse=True)
+    recommended_posts = []
+    for score, post, shared in scored[:RECOMMEND_COUNT]:
+        post = dict(post)
+        post['reason'] = recommendation_reason(post, shared, interest, liked_authors, followed, idf)
+        recommended_posts.append(post)
+
+    # Not enough matches: top up with popular posts the user hasn't seen.
+    if len(recommended_posts) < RECOMMEND_COUNT:
+        have = {p['id'] for p in recommended_posts}
+        for post in popular_fallback(user_id, filter_following, RECOMMEND_COUNT * 2):
+            if post['id'] not in have and len(recommended_posts) < RECOMMEND_COUNT:
+                recommended_posts.append(post)
+
+    # The docstring asks for reverse-chronological order.
+    recommended_posts.sort(key=lambda p: str(p['created_at']), reverse=True)
+    return recommended_posts
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
